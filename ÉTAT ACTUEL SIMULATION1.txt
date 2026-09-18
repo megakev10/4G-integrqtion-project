@@ -1,0 +1,334 @@
+ÉTAT ACTUEL — SIMULATION DU MODEM 4G
+
+1. OBJECTIF DU PROJET
+
+Le projet « Étude de l’intégration d’un module 4G à un système embarqué » vise à étudier et valider la communication entre un système embarqué et un modem 4G afin de permettre à l’ESP32 d’échanger des données avec un serveur distant via le réseau mobile.
+
+La simulation permet de développer et tester cette architecture avant l’acquisition d’un véritable module 4G.
+
+L’objectif n’est pas de simuler la couche radio LTE, mais de reproduire le comportement observable d’un modem à travers son interface UART/AT.
+
+2. ARCHITECTURE ACTUELLE
+
+L’architecture actuellement fonctionnelle est :
+
+PC
+│
+├── Virtual Modem (Python)
+│
+└── Port série virtuel (/dev/pts/X)
+│
+│ socat
+▼
+/dev/ttyUSB0
+│
+▼
+ESP32
+
+3. LIAISON SÉRIE
+
+La communication série entre l’ESP32 et le PC a été validée expérimentalement.
+
+Paramètres actuels :
+
+* Baud rate : 115200
+* Interface : UART
+* Communication bidirectionnelle : validée
+
+La liaison série virtuelle repose sur l’utilisation de socat sous Linux.
+
+3.1. Création d’une paire de ports série virtuels
+
+La commande utilisée pour créer une paire de pseudo-terminaux reliés entre eux est :
+
+socat -d -d pty,raw,echo=0 pty,raw,echo=0
+
+Exemple de résultat :
+
+PTY is /dev/pts/1
+PTY is /dev/pts/2
+starting data transfer loop...
+
+Cette commande crée deux ports série virtuels pouvant être utilisés comme les deux extrémités d’une liaison série.
+
+3.2. Connexion de l’ESP32 au port virtuel
+
+L’ESP32 est actuellement détecté sur :
+
+/dev/ttyUSB0
+
+La commande utilisée pour créer un pont entre le port physique de l’ESP32 et un port série virtuel est :
+
+socat -d -d pty,raw,echo=0 /dev/ttyUSB0,raw,echo=0,b115200
+
+Exemple de résultat :
+
+PTY is /dev/pts/5
+opening character device "/dev/ttyUSB0"
+starting data transfer loop
+
+Le port /dev/pts/5 devient alors l’extrémité virtuelle accessible par le modem virtuel Python.
+
+La chaîne de communication est donc :
+
+ESP32
+│
+│ USB / Serial
+▼
+/dev/ttyUSB0
+│
+│ socat
+▼
+/dev/pts/5
+│
+▼
+Virtual Modem Python
+
+3.3. Signification des paramètres socat
+
+-d -d
+Affiche des informations de diagnostic permettant notamment d’identifier les ports créés et de suivre l’état de la connexion.
+
+pty
+Crée un pseudo-terminal, c’est-à-dire un port série virtuel.
+
+raw
+Place le terminal en mode brut afin de transmettre les données sans traitement particulier.
+
+echo=0
+Désactive l’écho local des caractères.
+
+b115200
+Configure la vitesse de communication à 115200 bauds.
+
+3.4. Validation de la liaison
+
+La communication bidirectionnelle a été testée avec succès.
+
+Des données ont été transmises dans les deux directions afin de vérifier que les deux extrémités de la liaison pouvaient communiquer correctement.
+
+La liaison série est donc considérée comme validée.
+
+3.5. Utilisation dans l’architecture du projet
+
+La liaison série virtuelle permet de remplacer temporairement la liaison physique qui existera ultérieurement entre l’ESP32 et le modem 4G.
+
+Architecture simulée :
+
+ESP32
+│
+│ UART / AT
+▼
+socat
+│
+▼
+Port série virtuel
+│
+▼
+Virtual Modem Python
+
+Architecture réelle visée :
+
+ESP32
+│
+│ UART / AT
+▼
+EC200U-EU
+
+4. PREMIER MODEM VIRTUEL
+
+Un programme Python a été développé afin de jouer le rôle d’un modem virtuel.
+
+Son fonctionnement initial est volontairement minimal :
+
+ESP32 → AT
+↓
+Virtual Modem
+↓
+OK
+
+Le modem virtuel reçoit une commande AT et génère une réponse.
+
+Le premier échange :
+
+ESP32 → AT
+Modem → OK
+
+a été testé avec succès.
+
+5. ARCHITECTURE DU MODEM VIRTUEL
+
+Le modem virtuel est progressivement organisé comme un véritable composant logiciel.
+
+L’idée retenue est d’utiliser une classe représentant le modem :
+
+class VirtualModem:
+
+Cette classe possède des états internes tels que :
+
+* sim_ready
+* network_registered
+* data_connected
+* signal_quality
+* operator
+
+L’objectif est que les commandes AT puissent à terme interroger ou modifier l’état interne du modem, plutôt que de renvoyer systématiquement des réponses codées en dur.
+
+6. COMMANDES AT
+
+Les principales commandes actuellement prises en charge ou prévues sont :
+
+* AT : vérification de la communication avec le modem
+* AT+CPIN? : état de la SIM
+* AT+CSQ : qualité du signal
+* AT+CEREG? : état d’enregistrement sur le réseau
+* AT+COPS? : opérateur réseau
+
+Le modèle de réponse retenu est celui d’un modem réel :
+
+Commande
+↓
+Réponse(s) intermédiaire(s)
+↓
+Réponse finale
+
+Exemple :
+
+AT+CSQ
+
++CSQ: 20,99
+
+OK
+
+Une commande peut donc produire plusieurs lignes de réponse avant la réponse finale.
+
+7. GESTION DES RÉPONSES CÔTÉ ESP32
+
+Une fonction sendATCommand() a été créée afin d’éviter d’envoyer toutes les commandes AT à la suite sans attendre leurs réponses.
+
+Le principe est :
+
+send command
+↓
+wait for response
+↓
+read line
+↓
+process line
+↓
+wait for OK / ERROR
+
+La fonction permet notamment :
+
+* de vider les anciennes données présentes dans le buffer série ;
+* d’envoyer une commande AT ;
+* de lire les différentes lignes de réponse ;
+* d’ignorer les lignes vides ;
+* d’accumuler les lignes reçues ;
+* de détecter OK ;
+* de détecter ERROR ;
+* de gérer un timeout.
+
+L’accumulation des réponses est réalisée avec :
+
+response += line + "\n";
+
+Les lignes vides sont ignorées avec :
+
+if (line.length() == 0) {
+continue;
+}
+
+À ce stade, l’analyse avancée du contenu des réponses AT n’est pas encore implémentée.
+
+Par exemple, pour :
+
++CSQ: 20,99
+OK
+
+l’ESP32 reçoit correctement la réponse, mais n’extrait pas encore automatiquement les valeurs 20 et 99.
+
+8. ABSTRACTION modemSerial
+
+Une décision d’architecture importante a été prise : le code de communication avec le modem doit utiliser une interface abstraite appelée modemSerial plutôt que de dépendre directement de Serial partout dans le programme.
+
+L’objectif est de pouvoir passer facilement de la simulation :
+
+ESP32
+│
+└── modemSerial → PC → Virtual Modem
+
+à une architecture réelle :
+
+ESP32
+│
+└── modemSerial → UART → EC200U-EU
+
+Cela permettra de limiter les modifications du logiciel ESP32 lorsque le modem physique sera introduit.
+
+9. MODEM DE RÉFÉRENCE
+
+Le modem de référence du projet est actuellement le Quectel EC200U-EU.
+
+Il sert de référence pour :
+
+* les commandes AT ;
+* les réponses attendues ;
+* l’architecture de communication ;
+* le comportement du modem ;
+* la future connexion de données.
+
+Le simulateur ne cherche pas à reproduire physiquement le réseau LTE.
+
+Il cherche à reproduire l’interface observable d’un modem 4G par l’ESP32.
+
+10. ÉLÉMENTS VALIDÉS
+
+* ESP32 opérationnel : VALIDÉ
+* Communication série ESP32 ↔ PC : VALIDÉ
+* Liaison virtuelle avec socat : VALIDÉ
+* Communication bidirectionnelle : VALIDÉ
+* Modem virtuel Python : VALIDÉ
+* Réception des commandes AT : VALIDÉ
+* Réponse OK : VALIDÉ
+* Gestion des réponses multilignes : VALIDÉ
+* Détection OK / ERROR : VALIDÉ
+* Timeout : VALIDÉ
+* Architecture modemSerial : VALIDÉ
+* Parsing avancé des réponses : À FAIRE
+* Connexion réseau réelle : À FAIRE
+* TCP : À FAIRE
+* HTTP / API serveur : À FAIRE
+* Test avec un véritable EC200U-EU : À FAIRE
+
+11. PROCHAINE ÉTAPE
+
+La prochaine étape consiste à passer de la simple simulation de commandes AT à une véritable connectivité réseau.
+
+Architecture visée :
+
+ESP32
+│
+│ AT
+▼
+Virtual Modem
+│
+│ Connexion réseau réelle du PC
+▼
+Internet
+│
+▼
+Serveur
+
+L’objectif sera ensuite de permettre au modem virtuel d’utiliser l’état réel de la connexion réseau du PC.
+
+Cela permettra notamment de tester des situations telles que :
+
+* Internet disponible ;
+* Internet indisponible ;
+* connexion perdue ;
+* connexion rétablie ;
+* impossibilité de joindre le serveur.
+
+Le parsing avancé des réponses AT sera développé ultérieurement, une fois la connectivité validée.
+
